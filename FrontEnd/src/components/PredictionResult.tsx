@@ -1,11 +1,13 @@
-import { Shield, ShieldAlert, ShieldCheck, Scan, Activity } from "lucide-react";
+import { Shield, ShieldAlert, ShieldCheck, Scan, Activity, Info } from "lucide-react";
 import { cn } from "@/lib/utils";
+import type { PredictResponse, ShapTopToken } from "@/lib/mockPredict";
+import { getVerdictView, isShapExplanation, isShapTopToken } from "@/lib/mockPredict";
+import { Badge } from "@/components/ui/badge";
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 interface PredictionResultProps {
-  result: {
-    label: "clean" | "defective";
-    probability: number;
-  } | null;
+  result: PredictResponse | null;
   isLoading: boolean;
 }
 
@@ -84,8 +86,41 @@ const PredictionResult = ({ result, isLoading }: PredictionResultProps) => {
     );
   }
 
-  const isClean = result.label === "clean";
-  const percentage = Math.round(result.probability * 100);
+  const isClean = result.prediction === "clean";
+  const { probability } = getVerdictView(result);
+  const percentage = Math.round(probability * 100);
+
+  const shap = isShapExplanation(result.explanation) ? result.explanation : null;
+  const topTokens: ShapTopToken[] = shap
+    ? shap.top_tokens.filter(isShapTopToken)
+    : [];
+
+  const explanationType =
+    result.explanation &&
+    typeof result.explanation === "object" &&
+    typeof (result.explanation as Record<string, unknown>)["type"] === "string"
+      ? ((result.explanation as Record<string, unknown>)["type"] as string)
+      : null;
+
+  const ruleJustification =
+    result.rule_justification &&
+    typeof result.rule_justification === "object" &&
+    typeof (result.rule_justification as Record<string, unknown>)["name"] === "string" &&
+    typeof (result.rule_justification as Record<string, unknown>)["reason"] === "string"
+      ? (result.rule_justification as Record<string, unknown>)
+      : null;
+
+  // Justification dispatcher precedence:
+  // 1) Model `explanation`
+  // 2) `rule_justification`
+  // 3) Nothing
+  const justificationKind: "model_shap" | "model_other" | "rule" | null = shap
+    ? "model_shap"
+    : explanationType
+      ? "model_other"
+      : ruleJustification
+        ? "rule"
+        : null;
 
   return (
     <div
@@ -157,7 +192,23 @@ const PredictionResult = ({ result, isLoading }: PredictionResultProps) => {
         {/* Confidence meter */}
         <div className="w-full max-w-xs space-y-3 mt-2">
           <div className="flex justify-between items-center text-sm">
-            <span className="text-muted-foreground font-medium">Confidence Score</span>
+            <span className="text-muted-foreground font-medium inline-flex items-center gap-1.5">
+              Confidence Score
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    className="inline-flex items-center justify-center rounded p-0.5 text-muted-foreground/70 hover:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                    aria-label="Confidence details"
+                  >
+                    <Info className="w-3.5 h-3.5" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  Backend-reported confidence value for the returned prediction (rule-based overrides may force this).
+                </TooltipContent>
+              </Tooltip>
+            </span>
             <span className={cn(
               "font-mono font-bold text-lg",
               isClean ? "text-success" : "text-destructive"
@@ -178,6 +229,210 @@ const PredictionResult = ({ result, isLoading }: PredictionResultProps) => {
             {/* Shine effect */}
             <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent shimmer" />
           </div>
+        </div>
+
+        {/* Backend authority + explainability (additive) */}
+        <div className="w-full max-w-xs mt-5 space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="inline-flex items-center gap-1.5 text-sm text-muted-foreground font-medium">
+              Decision Source
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    className="inline-flex items-center justify-center rounded p-0.5 text-muted-foreground/70 hover:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                    aria-label="Decision source details"
+                  >
+                    <Info className="w-3.5 h-3.5" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  Provided verbatim by the backend to indicate which authority produced the final decision.
+                </TooltipContent>
+              </Tooltip>
+            </div>
+            <Badge variant="secondary" className="font-mono text-[10px] max-w-[220px] truncate">
+              {result.decision_source}
+            </Badge>
+          </div>
+
+          {justificationKind === "model_shap" ? (
+            <Accordion type="single" collapsible className="w-full">
+              <AccordionItem value="model-explanation" className="border-border/40">
+                <AccordionTrigger className="py-2 text-sm">
+                  <div className="flex items-center gap-2">
+                    <span>Model Inference</span>
+                    <Badge variant="outline" className="font-mono text-[10px]">
+                      {shap?.type}
+                    </Badge>
+                  </div>
+                </AccordionTrigger>
+                <AccordionContent className="pt-2">
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between text-xs text-muted-foreground">
+                      <span className="inline-flex items-center gap-1.5">
+                        Inference confidence
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              className="inline-flex items-center justify-center rounded p-0.5 text-muted-foreground/70 hover:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                              aria-label="Model confidence details"
+                            >
+                              <Info className="w-3.5 h-3.5" />
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            Backend-provided confidence for the model inference (separate from the displayed verdict confidence).
+                          </TooltipContent>
+                        </Tooltip>
+                      </span>
+                      <span className="font-mono">{Math.round((shap?.model_confidence ?? 0) * 100)}%</span>
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between text-xs text-muted-foreground">
+                        <span className="inline-flex items-center gap-1.5">
+                          Top tokens (impact)
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <button
+                                type="button"
+                                className="inline-flex items-center justify-center rounded p-0.5 text-muted-foreground/70 hover:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                                aria-label="Impact details"
+                              >
+                                <Info className="w-3.5 h-3.5" />
+                              </button>
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              Signed influence values (normalized); not probabilities.
+                            </TooltipContent>
+                          </Tooltip>
+                        </span>
+                        <span className="font-mono">{topTokens.length}</span>
+                      </div>
+
+                      {topTokens.length === 0 ? (
+                        <div className="text-xs text-muted-foreground/80">
+                          No token attributions available for this input.
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          {(() => {
+                            const maxAbs = Math.max(...topTokens.map((t) => Math.abs(t.impact)), 0);
+                            return topTokens.map((t, idx) => {
+                              const widthPct = maxAbs > 0 ? (Math.abs(t.impact) / maxAbs) * 100 : 0;
+                              const sign = t.impact >= 0 ? "+" : "";
+                              return (
+                                <div key={`${t.token}-${idx}`} className="space-y-1">
+                                  <div className="flex items-center justify-between gap-3">
+                                    <span className="font-mono text-xs truncate">{t.token}</span>
+                                    <span className="font-mono text-xs text-muted-foreground">
+                                      {sign}
+                                      {t.impact.toFixed(4)}
+                                    </span>
+                                  </div>
+                                  <div className="h-1.5 bg-muted/30 rounded-full overflow-hidden">
+                                    <div className="h-full bg-primary/70" style={{ width: `${widthPct}%` }} />
+                                  </div>
+                                </div>
+                              );
+                            });
+                          })()}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </AccordionContent>
+              </AccordionItem>
+            </Accordion>
+          ) : justificationKind === "model_other" ? (
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-xs text-muted-foreground">Model Inference</span>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Badge variant="outline" className="font-mono text-[10px] cursor-help max-w-[220px] truncate">
+                    {explanationType}
+                  </Badge>
+                </TooltipTrigger>
+                <TooltipContent>Backend attached an unsupported explanation type.</TooltipContent>
+              </Tooltip>
+            </div>
+          ) : justificationKind === "rule" ? (
+            <Accordion type="single" collapsible className="w-full">
+              <AccordionItem value="rule-justification" className="border-border/40">
+                <AccordionTrigger className="py-2 text-sm">
+                  <div className="flex items-center gap-2">
+                    <span>Triggered Rule</span>
+                    <Badge variant="outline" className="font-mono text-[10px]">
+                      rule-based
+                    </Badge>
+                  </div>
+                </AccordionTrigger>
+                <AccordionContent className="pt-2">
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+                      <span className="inline-flex items-center gap-1.5">
+                        Trigger details
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              className="inline-flex items-center justify-center rounded p-0.5 text-muted-foreground/70 hover:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                              aria-label="Rule attribute details"
+                            >
+                              <Info className="w-3.5 h-3.5" />
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent>Provided verbatim by the backend for rule-based decisions.</TooltipContent>
+                        </Tooltip>
+                      </span>
+                      <div className="flex items-center gap-2">
+                        {typeof ruleJustification?.["verdict"] === "string" ? (
+                          <Badge variant="secondary" className="font-mono text-[10px]">
+                            {String(ruleJustification["verdict"])}
+                          </Badge>
+                        ) : null}
+                        {typeof ruleJustification?.["rule_type"] === "string" ? (
+                          <Badge variant="secondary" className="font-mono text-[10px]">
+                            {String(ruleJustification["rule_type"])}
+                          </Badge>
+                        ) : null}
+                        {typeof ruleJustification?.["certainty"] === "string" ? (
+                          <Badge variant="secondary" className="font-mono text-[10px]">
+                            {String(ruleJustification["certainty"]) === "certain"
+                              ? "GUARANTEED"
+                              : String(ruleJustification["certainty"]).toUpperCase()}
+                          </Badge>
+                        ) : typeof ruleJustification?.["confidence"] === "string" ? (
+                          <Badge variant="secondary" className="font-mono text-[10px]">
+                            {String(ruleJustification["confidence"])}
+                          </Badge>
+                        ) : null}
+                      </div>
+                    </div>
+
+                    {typeof ruleJustification?.["category"] === "string" ? (
+                      <div className="space-y-1">
+                        <div className="text-xs text-muted-foreground">Category</div>
+                        <div className="font-mono text-xs truncate">{String(ruleJustification["category"])}</div>
+                      </div>
+                    ) : null}
+
+                    <div className="space-y-1">
+                      <div className="text-xs text-muted-foreground">Triggered rule</div>
+                      <div className="font-mono text-xs truncate">{String(ruleJustification?.["name"])}</div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <div className="text-xs text-muted-foreground">Why it triggered</div>
+                      <div className="text-xs text-foreground/90 leading-snug">{String(ruleJustification?.["reason"])}</div>
+                    </div>
+                  </div>
+                </AccordionContent>
+              </AccordionItem>
+            </Accordion>
+          ) : null}
         </div>
       </div>
     </div>

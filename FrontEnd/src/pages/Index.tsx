@@ -16,10 +16,9 @@ import {
 import CodeEditor from "@/components/CodeEditor";
 import PredictionResult from "@/components/PredictionResult";
 import AnimatedBackground from "@/components/AnimatedBackground";
-import { PredictionResult as PredictionType } from "@/lib/mockPredict"; // TYPE ONLY
+import { PredictResponse, getVerdictView, predict } from "@/lib/mockPredict";
 
-// 🔽 BACKEND URL
-const BACKEND_URL = "http://127.0.0.1:8000/predict";
+// Backend URL is defined in `src/lib/mockPredict.ts`.
 
 const SAMPLE_CODE = `// Example: Buffer overflow vulnerability
 void vulnerable_function(char *input) {
@@ -49,34 +48,13 @@ int main() {
 
 const Index = () => {
   const [code, setCode] = useState(SAMPLE_CODE);
-  const [result, setResult] = useState<PredictionType | null>(null);
+  const [result, setResult] = useState<PredictResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const { toast } = useToast();
 
   // 🔽 REPLACED mockPredict WITH REAL BACKEND CALL
-  const analyzeWithBackend = async (code: string): Promise<PredictionType> => {
-    const response = await fetch(BACKEND_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ code }),
-    });
-
-    if (!response.ok) {
-      throw new Error("Backend error");
-    }
-
-    const data = await response.json();
-
-    // 🔁 MAP BACKEND RESPONSE → UI FORMAT
-    return {
-      label: data.prediction === "defective" ? "defective" : "clean",
-      probability:
-        data.prediction === "defective"
-          ? data.defect_probability
-          : data.clean_probability,
-    };
+  const analyzeWithBackend = async (code: string): Promise<PredictResponse> => {
+    return predict(code);
   };
 
   const handleAnalyze = async () => {
@@ -96,13 +74,15 @@ const Index = () => {
       const prediction = await analyzeWithBackend(code);
       setResult(prediction);
 
+      const { label, probability } = getVerdictView(prediction);
+
       toast({
         title:
-          prediction.label === "clean"
+          label === "clean"
             ? "✓ Code is Clean"
             : "⚠ Defect Detected",
         description: `Confidence: ${Math.round(
-          prediction.probability * 100
+          probability * 100
         )}%`,
       });
     } catch (error) {
