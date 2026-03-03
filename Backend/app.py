@@ -287,7 +287,7 @@ def _xai_shap_explain_one(code: str, model_confidence: float) -> Optional[Dict[s
 # GEMINI LLM CONFIGURATION (SCAFFOLDING)
 # ------------------------------------------------------------
 ENABLE_LLM_EXPLANATION = True
-GEMINI_API_KEY = "AIzaSyC8XkDPTCqHepjc7OT7RI-acBvcHKQTG0o"
+GEMINI_API_KEY = "API Key" #add your gemini api key
 print("GEMINI_API_KEY set:", bool(GEMINI_API_KEY))
 LLM_TIMEOUT_SECONDS = int(os.environ.get("LLM_TIMEOUT_SECONDS", "20"))
 
