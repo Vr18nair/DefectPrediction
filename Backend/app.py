@@ -1,5 +1,11 @@
+import os
+# Resolve OMP: Error #15 (Multiple OpenMP runtimes)
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
 import torch
 import re
+import requests
+import json
 import random
 import hashlib
 from contextlib import contextmanager
@@ -276,6 +282,173 @@ def _xai_shap_explain_one(code: str, model_confidence: float) -> Optional[Dict[s
         "model_confidence": round(float(model_confidence), 4),
         "top_tokens": payload_tokens,
     }
+
+# ------------------------------------------------------------
+# GEMINI LLM CONFIGURATION (SCAFFOLDING)
+# ------------------------------------------------------------
+ENABLE_LLM_EXPLANATION = True
+GEMINI_API_KEY = "AIzaSyC8XkDPTCqHepjc7OT7RI-acBvcHKQTG0o"
+print("GEMINI_API_KEY set:", bool(GEMINI_API_KEY))
+LLM_TIMEOUT_SECONDS = int(os.environ.get("LLM_TIMEOUT_SECONDS", "20"))
+
+# Static, deterministic prompt template
+LLM_EXPLANATION_PROMPT_TEMPLATE = (
+    "As an expert security researcher, summarize why the following code tokens "
+    "({tokens}) contribute to a defect probability of {prob} in the following code snippet.\n\n"
+    "Code:\n{code}\n\n"
+    "Requirement: Return ONLY a JSON object with a single key 'summary'.\n"
+    "STRICT CONSTRAINTS:\n"
+    "- The summary must be exactly one sentence, concise, and technical.\n"
+    "- Use cautious, probabilistic language (e.g., 'may indicate', 'suggests').\n"
+    "- DO NOT reclassify the result or re-evaluate the verdict.\n"
+    "- DO NOT introduce new vulnerability categories not implied by the tokens.\n"
+    "- DO NOT claim certainty (e.g., avoid 'definitely', 'is vulnerable').\n"
+    "- DO NOT reference rules or rule-based detection."
+)
+
+# Determine effective activation state
+if not ENABLE_LLM_EXPLANATION:
+    LLM_LAYER_ACTIVE = False
+    print("LLM explanation layer: DISABLED")
+elif not GEMINI_API_KEY:
+    LLM_LAYER_ACTIVE = False
+    print("LLM explanation layer: DISABLED (missing API key)")
+else:
+    LLM_LAYER_ACTIVE = True
+    print("LLM explanation layer: ENABLED (Gemini configured)")
+
+
+def call_gemini(prompt: str) -> Optional[str]:
+    """
+    Reliable and bounded Gemini transport function using direct HTTP.
+    Must not influence classification. Catch all exceptions.
+    """
+    if not LLM_LAYER_ACTIVE:
+        return None
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    
+    payload = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }],
+        "generationConfig": {
+            "temperature": 0.0,
+            "topP": 1.0,
+            "topK": 1,
+            "candidateCount": 1,
+            "maxOutputTokens": 512,
+        }
+    }
+
+    try:
+        response = requests.post(
+            url,
+            json=payload,
+            timeout=LLM_TIMEOUT_SECONDS
+        )
+        response.raise_for_status()
+        
+        res_json = response.json()
+        
+        # Minimally extract text from standard Gemini response structure
+        # candidates[0].content.parts[0].text
+        candidates = res_json.get("candidates", [])
+        if candidates and len(candidates) > 0:
+            content = candidates[0].get("content", {})
+            parts = content.get("parts", [])
+            if parts and len(parts) > 0:
+                return parts[0].get("text")
+                
+    except requests.exceptions.Timeout:
+        print(f"LLM Warning: Gemini call timed out after {LLM_TIMEOUT_SECONDS}s")
+    except requests.exceptions.RequestException as e:
+        print(f"LLM Warning: Gemini transport error: {e}")
+    except Exception as e:
+        print(f"LLM Warning: Unexpected error in Gemini transport: {e}")
+
+    return None
+
+
+def validate_gemini_response(raw_text: Optional[str]) -> Optional[str]:
+    """
+    Strictly validates that Gemini output reflects the required JSON schema:
+    { "summary": "string" }
+    Also performs defensive content checks to prevent authority leakage.
+    """
+    if not raw_text or not isinstance(raw_text, str):
+        return None
+
+    # Strip markdown code fences if present (Gemini commonly wraps JSON this way)
+    raw_text = raw_text.strip()
+    if raw_text.startswith("```"):
+        # Remove opening fence (e.g. ```json or ```)
+        raw_text = raw_text.split("\n", 1)[-1] if "\n" in raw_text else raw_text[3:]
+    if raw_text.endswith("```"):
+        raw_text = raw_text[:-3]
+    raw_text = raw_text.strip()
+    print(raw_text)
+    try:
+        data = json.loads(raw_text)
+    except (json.JSONDecodeError, TypeError):
+        print("LLM Validation: rejected (invalid JSON)")
+        return None
+
+    if not isinstance(data, dict):
+        return None
+
+    # Ensure exactly one key: "summary"
+    if list(data.keys()) != ["summary"]:
+        return None
+
+    summary = data.get("summary")
+    if not isinstance(summary, str):
+        return None
+
+    summary = summary.strip()
+    
+    # Enforce non-empty and length bounds (500 chars)
+    if not summary or len(summary) > 500:
+        return None
+
+    # Authority Leakage Check
+    forbidden_phrases = [
+        "definitely",
+        "certainly",
+        "is vulnerable",
+        "guaranteed",
+        "rule detected",
+        "the rule",
+        "reclassified",
+        "manual checker"
+    ]
+    summary_lower = summary.lower()
+    for phrase in forbidden_phrases:
+        if phrase in summary_lower:
+            return None
+
+    return summary
+
+
+def generate_fallback_summary(top_tokens: List[Dict[str, Any]], defect_probability: float) -> str:
+    """
+    Deterministic fallback generator. Ensures an explanation exists even if LLM fails.
+    Uses SHAP tokens and cautious language. Same input -> Identical output.
+    """
+    if not top_tokens:
+        return f"Based on the model's inference (defect probability: {defect_probability:.2f}), no specific code tokens were identified as having high individual influence."
+
+    tok_names = [t.get("token", "unk") for t in top_tokens[:5]]
+    token_list_str = ", ".join([f"'{t}'" for t in tok_names])
+
+    prob_str = f"{defect_probability:.2f}"
+    
+    return (
+        f"Based on the model's inference (defect probability: {prob_str}), the following tokens "
+        f"were found to have high statistical influence on the classification: {token_list_str}. "
+        "This indicates these specific patterns contributed most to the model's decision."
+    )
+
 
 # ------------------------------------------------------------
 # REQUEST SCHEMA
@@ -577,6 +750,22 @@ def structural_clean_override(code: str):
 # ------------------------------------------------------------
 # 🧠 CLASSIFICATION LOGIC (PRIORITY PIPELINE)
 # ------------------------------------------------------------
+# ARCHITECTURAL INVARIANTS – DO NOT MODIFY
+# ------------------------------------------------------------
+# 1. Pipeline Order: The classification pipeline order is fixed and must not change:
+#    - Manual Defect Rules (Highest Priority)
+#    - Safe API Overrides
+#    - Structural Clean Overrides
+#    - Static Heuristics
+#    - ML Inference (Lowest Priority)
+# 2. Rule Authority: Rule logic (manual, safe, structural, static) supersedes ML.
+# 3. ML Thresholds: Decision thresholds (e.g., 0.60) must not change.
+# 4. Decision Source: 'decision_source' must remain authoritative and untouched.
+# 5. Mutual Exclusivity: 'rule_justification' and ('explanation_tokens' + 'explanation_summary') 
+#    are mutually exclusive.
+#
+# LLM layer is interpretive only. It must not influence classification.
+# ------------------------------------------------------------
 def classify_one(code: str):
 
     # 🔴 1. MANUAL DEFECT CHECKER (HIGHEST PRIORITY)
@@ -609,21 +798,13 @@ def classify_one(code: str):
             },
         }
 
-    # 🟢 0.5 STRUCTURAL CLEAN OVERRIDE  ← 🔥 NEW
-    if structural_clean_override(code):
-        return {
-            "prediction": "clean",
-            "clean_probability": 0.9,
-            "defect_probability": 0.1,
-            "decision_source": "structural_clean_override",
-            "rule_justification": _structural_clean_override_justification(code) or {
-                "name": "unknown_structural_clean_rule",
-                "reason": "A structural clean override pattern matched.",
-                "certainty": "certain",
-                "rule_type": "override",
-                "verdict": "clean",
-            },
-        }
+    # 🟢 0.5 STRUCTURAL CLEAN FLAG (evaluated pre-ML, applied post-ML)
+    structural_flag = structural_clean_override(code)
+    structural_justification = (
+        _structural_clean_override_justification(code)
+        if structural_flag
+        else None
+    )
 
     # 🟠 2. STATIC SAFETY CHECK
     static_flag = static_safety_check(code)
@@ -646,6 +827,17 @@ def classify_one(code: str):
         pred = "clean"
         source = "ml_low_confidence"
 
+    # 🟢 0.5 STRUCTURAL OVERRIDE (post-ML, conditional)
+    # Only reinforce an already-clean ML decision. Never suppress defects.
+    if structural_flag and pred == "clean" and not static_flag:
+        source = "structural_clean_override"
+
+    # --- DEBUG: Classification Flow ---
+    print("SOURCE:", source)
+    print("PRED:", pred)
+    print("STATIC_FLAG:", static_flag)
+    print("STRUCTURAL_FLAG:", structural_flag if 'structural_flag' in locals() else None)
+
     result: Dict[str, Any] = {
         "prediction": pred,
         "clean_probability": clean_prob,
@@ -653,15 +845,64 @@ def classify_one(code: str):
         "decision_source": source
     }
 
+    # 1. Rule-based path (Static Heuristics)
     if source == "static_rule" and static_justification is not None:
         result["rule_justification"] = static_justification
 
-    # Attach SHAP explanation ONLY when ML is the final decision authority.
-    if isinstance(source, str) and source.startswith("ml_"):
-        model_confidence = defect_prob if pred == "defective" else clean_prob
-        explanation = _xai_shap_explain_one(code, model_confidence=model_confidence)
-        if explanation is not None:
-            result["explanation"] = explanation
+    # 1b. Structural clean override (post-ML bias reducer)
+    elif source == "structural_clean_override" and structural_justification is not None:
+        result["rule_justification"] = structural_justification
+
+    # 2. ML-defective path (Integrative Explanation Layer)
+    elif isinstance(source, str) and source.startswith("ml_") and pred == "defective":
+        print("Entering ML explanation block")
+        explanation = _xai_shap_explain_one(code, model_confidence=defect_prob)
+        top_tokens = explanation.get("top_tokens", []) if (explanation and isinstance(explanation, dict)) else []
+        
+        # Always provide the tokens key (even if empty) to maintain contract
+        result["explanation_tokens"] = top_tokens
+        
+        # Synthesis Phase: Determine summary via LLM or Fallback
+        summary = None
+        if LLM_LAYER_ACTIVE:
+            tokens_str = ", ".join([t["token"] for t in top_tokens[:5]]) if top_tokens else "no specific tokens"
+            prompt = LLM_EXPLANATION_PROMPT_TEMPLATE.format(
+                tokens=tokens_str,
+                prob=f"{defect_prob:.2f}",
+                code=code
+            )
+            print("Gemini call attempted")
+            raw_res = call_gemini(prompt)
+            summary = validate_gemini_response(raw_res)
+            if summary:
+                print("Gemini call succeeded")
+        
+        # Robust Fallback: Triggered if LLM is disabled, timed out, or rejected
+        if not summary:
+            print("Fallback explanation used")
+            summary = generate_fallback_summary(top_tokens, defect_prob)
+            
+        result["explanation_summary"] = summary
+
+    # 3. ML-clean path
+    # (By default, no rule_justification or explanation fields are added)
+
+    # --- DEFENSIVE INVARIANT ENFORCEMENT ---
+    if (
+        isinstance(result.get("decision_source"), str)
+        and result["decision_source"].startswith("ml_")
+        and result.get("prediction") == "defective"
+    ):
+        if "explanation_summary" not in result:
+            print("Invariant enforcement triggered: explanation fields missing")
+            result["explanation_tokens"] = []
+            result["explanation_summary"] = generate_fallback_summary(
+                [],
+                result.get("defect_probability", 0.0)
+            )
+
+    # --- DEBUG: Final Payload ---
+    print("FINAL RESULT:", result)
 
     return result
 

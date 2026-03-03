@@ -34,6 +34,8 @@ export interface PredictResponse {
   decision_source: string;
   explanation?: Explanation;
   rule_justification?: RuleJustification;
+  explanation_summary?: string;
+  explanation_tokens?: Array<{ token: string; impact: number }>;
   // Allow future backend fields without breaking typing at call sites.
   [key: string]: unknown;
 }

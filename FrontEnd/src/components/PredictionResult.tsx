@@ -19,7 +19,7 @@ const PredictionResult = ({ result, isLoading }: PredictionResultProps) => {
         <div className="absolute inset-0 overflow-hidden">
           <div className="absolute inset-x-0 h-32 bg-gradient-to-b from-primary/30 via-primary/10 to-transparent scan-line" />
         </div>
-        
+
         {/* Corner decorations */}
         <div className="absolute top-3 left-3 w-6 h-6 border-t border-l border-primary/60" />
         <div className="absolute top-3 right-3 w-6 h-6 border-t border-r border-primary/60" />
@@ -66,7 +66,7 @@ const PredictionResult = ({ result, isLoading }: PredictionResultProps) => {
       <div className="relative rounded-2xl border border-dashed border-border/60 bg-card/30 p-8 min-h-[340px]">
         {/* Grid pattern overlay */}
         <div className="absolute inset-0 grid-bg opacity-30 rounded-2xl" />
-        
+
         <div className="relative flex flex-col items-center justify-center gap-5 h-full">
           <div className="p-6 rounded-full bg-muted/30 border border-border/50">
             <Shield className="w-12 h-12 text-muted-foreground/60" />
@@ -97,30 +97,39 @@ const PredictionResult = ({ result, isLoading }: PredictionResultProps) => {
 
   const explanationType =
     result.explanation &&
-    typeof result.explanation === "object" &&
-    typeof (result.explanation as Record<string, unknown>)["type"] === "string"
+      typeof result.explanation === "object" &&
+      typeof (result.explanation as Record<string, unknown>)["type"] === "string"
       ? ((result.explanation as Record<string, unknown>)["type"] as string)
       : null;
 
   const ruleJustification =
     result.rule_justification &&
-    typeof result.rule_justification === "object" &&
-    typeof (result.rule_justification as Record<string, unknown>)["name"] === "string" &&
-    typeof (result.rule_justification as Record<string, unknown>)["reason"] === "string"
+      typeof result.rule_justification === "object" &&
+      typeof (result.rule_justification as Record<string, unknown>)["name"] === "string" &&
+      typeof (result.rule_justification as Record<string, unknown>)["reason"] === "string"
       ? (result.rule_justification as Record<string, unknown>)
       : null;
 
+  // ML explanation fields from updated backend contract
+  const mlSummary = typeof result.explanation_summary === "string" && result.explanation_summary.trim()
+    ? result.explanation_summary.trim()
+    : null;
+  const mlTokens = Array.isArray(result.explanation_tokens) ? result.explanation_tokens : [];
+
   // Justification dispatcher precedence:
-  // 1) Model `explanation`
-  // 2) `rule_justification`
-  // 3) Nothing
-  const justificationKind: "model_shap" | "model_other" | "rule" | null = shap
-    ? "model_shap"
-    : explanationType
-      ? "model_other"
-      : ruleJustification
-        ? "rule"
-        : null;
+  // 1) ML explanation summary (new contract)
+  // 2) Model `explanation` (legacy SHAP object)
+  // 3) `rule_justification`
+  // 4) Nothing
+  const justificationKind: "ml_explanation" | "model_shap" | "model_other" | "rule" | null = mlSummary
+    ? "ml_explanation"
+    : shap
+      ? "model_shap"
+      : explanationType
+        ? "model_other"
+        : ruleJustification
+          ? "rule"
+          : null;
 
   return (
     <div
@@ -132,13 +141,13 @@ const PredictionResult = ({ result, isLoading }: PredictionResultProps) => {
       )}
     >
       {/* Background gradient */}
-      <div 
+      <div
         className={cn(
           "absolute inset-0 opacity-20",
-          isClean 
+          isClean
             ? "bg-gradient-to-br from-success/30 via-transparent to-success/10"
             : "bg-gradient-to-br from-destructive/30 via-transparent to-destructive/10"
-        )} 
+        )}
       />
 
       {/* Corner decorations */}
@@ -151,8 +160,8 @@ const PredictionResult = ({ result, isLoading }: PredictionResultProps) => {
         {/* Status badge */}
         <div className={cn(
           "px-3 py-1 rounded-full text-xs font-mono uppercase tracking-wider",
-          isClean 
-            ? "bg-success/20 text-success border border-success/30" 
+          isClean
+            ? "bg-success/20 text-success border border-success/30"
             : "bg-destructive/20 text-destructive border border-destructive/30"
         )}>
           {isClean ? "SECURE" : "VULNERABLE"}
@@ -220,8 +229,8 @@ const PredictionResult = ({ result, isLoading }: PredictionResultProps) => {
             <div
               className={cn(
                 "absolute inset-y-0 left-0 rounded-full transition-all duration-1000 ease-out",
-                isClean 
-                  ? "bg-gradient-to-r from-success/80 to-success" 
+                isClean
+                  ? "bg-gradient-to-r from-success/80 to-success"
                   : "bg-gradient-to-r from-destructive/80 to-destructive"
               )}
               style={{ width: `${percentage}%` }}
@@ -256,7 +265,93 @@ const PredictionResult = ({ result, isLoading }: PredictionResultProps) => {
             </Badge>
           </div>
 
-          {justificationKind === "model_shap" ? (
+          {justificationKind === "ml_explanation" ? (
+            <Accordion type="single" collapsible className="w-full">
+              <AccordionItem value="ml-explanation" className="border-border/40">
+                <AccordionTrigger className="py-2 text-sm">
+                  <div className="flex items-center gap-2">
+                    <span>ML Explanation</span>
+                    <Badge variant="outline" className="font-mono text-[10px]">
+                      neural-analysis
+                    </Badge>
+                  </div>
+                </AccordionTrigger>
+                <AccordionContent className="pt-2">
+                  <div className="space-y-3">
+                    {/* Summary */}
+                    <div className="space-y-1">
+                      <div className="text-xs text-muted-foreground inline-flex items-center gap-1.5">
+                        Analysis Summary
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              className="inline-flex items-center justify-center rounded p-0.5 text-muted-foreground/70 hover:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                              aria-label="Summary details"
+                            >
+                              <Info className="w-3.5 h-3.5" />
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            Backend-generated explanation of why this code may contain a defect.
+                          </TooltipContent>
+                        </Tooltip>
+                      </div>
+                      <p className="text-xs text-foreground/90 leading-snug">{mlSummary}</p>
+                    </div>
+
+                    {/* Tokens */}
+                    {mlTokens.length > 0 && (
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between text-xs text-muted-foreground">
+                          <span className="inline-flex items-center gap-1.5">
+                            Top tokens (impact)
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <button
+                                  type="button"
+                                  className="inline-flex items-center justify-center rounded p-0.5 text-muted-foreground/70 hover:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                                  aria-label="Token impact details"
+                                >
+                                  <Info className="w-3.5 h-3.5" />
+                                </button>
+                              </TooltipTrigger>
+                              <TooltipContent>
+                                Signed influence values (normalized); not probabilities.
+                              </TooltipContent>
+                            </Tooltip>
+                          </span>
+                          <span className="font-mono">{mlTokens.length}</span>
+                        </div>
+                        <div className="space-y-2">
+                          {(() => {
+                            const maxAbs = Math.max(...mlTokens.map((t) => Math.abs(t.impact)), 0);
+                            return mlTokens.map((t, idx) => {
+                              const widthPct = maxAbs > 0 ? (Math.abs(t.impact) / maxAbs) * 100 : 0;
+                              const sign = t.impact >= 0 ? "+" : "";
+                              return (
+                                <div key={`${t.token}-${idx}`} className="space-y-1">
+                                  <div className="flex items-center justify-between gap-3">
+                                    <span className="font-mono text-xs truncate">{t.token}</span>
+                                    <span className="font-mono text-xs text-muted-foreground">
+                                      {sign}{t.impact.toFixed(4)}
+                                    </span>
+                                  </div>
+                                  <div className="h-1.5 bg-muted/30 rounded-full overflow-hidden">
+                                    <div className="h-full bg-primary/70" style={{ width: `${widthPct}%` }} />
+                                  </div>
+                                </div>
+                              );
+                            });
+                          })()}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </AccordionContent>
+              </AccordionItem>
+            </Accordion>
+          ) : justificationKind === "model_shap" ? (
             <Accordion type="single" collapsible className="w-full">
               <AccordionItem value="model-explanation" className="border-border/40">
                 <AccordionTrigger className="py-2 text-sm">
